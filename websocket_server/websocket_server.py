@@ -90,15 +90,18 @@ class WebSocketHandler(StreamRequestHandler):
             yield self.read_next_message()
 
     def handle(self):
-        while self.keep_alive:
-            if not self.handshake_done:
-                path = self.handshake()
+        try:
+            while self.keep_alive:
+                if not self.handshake_done:
+                    path = self.handshake()
 
-            if path not in ROUTING_TABLE:
-                logger.warning('Bad path for websocket request: %s' % path)
-                return
-            route_fn = ROUTING_TABLE[path]
-            route_fn(iter(self.message_stream()), self.send_message)
+                if path not in ROUTING_TABLE:
+                    logger.warning('Bad path for websocket request: %s' % path)
+                    return
+                route_fn = ROUTING_TABLE[path]
+                route_fn(iter(self.message_stream()), self.send_message)
+        except BrokenPipeError as e:
+            logger.info("Client connection broken.")
 
     def read_bytes(self, num):
         # python3 gives ordinal of byte directly
