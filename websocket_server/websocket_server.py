@@ -1,13 +1,14 @@
 # Author: Johan Hanssen Seferidis
 # License: MIT
 
+import errno
+import logging
 import sys
 import struct
+import threading
 from base64 import b64encode
 from hashlib import sha1
-import logging
 from socket import error as SocketError
-import errno
 
 if sys.version_info[0] < 3:
     from SocketServer import ThreadingMixIn, TCPServer, StreamRequestHandler
@@ -15,7 +16,33 @@ else:
     from socketserver import ThreadingMixIn, TCPServer, StreamRequestHandler
 
 logger = logging.getLogger(__name__)
-logging.basicConfig()
+
+def encode_to_UTF8(data):
+    try:
+        return data.encode('UTF-8')
+    except UnicodeEncodeError as e:
+        logger.error("Could not encode data to UTF-8 -- %s" % e)
+        return False
+    except Exception as e:
+        raise(e)
+        return False
+
+def try_decode_UTF8(data):
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        return False
+    except Exception as e:
+        raise(e)
+
+ROUTING_TABLE = {}
+
+# Decorator for routing websocket handlers a la Flask
+def route(path):
+    def decorate(fn):
+        ROUTING_TABLE[path] = fn
+        return fn
+    return decorate
 
 '''
 +-+-+-+-+-------+-+-------------+-------------------------------+
@@ -47,122 +74,7 @@ OPCODE_CLOSE_CONN   = 0x8
 OPCODE_PING         = 0x9
 OPCODE_PONG         = 0xA
 
-
-# -------------------------------- API ---------------------------------
-
-class API():
-
-    def run_forever(self):
-        try:
-            logger.info("Listening on port %d for clients.." % self.port)
-            self.serve_forever()
-        except KeyboardInterrupt:
-            self.server_close()
-            logger.info("Server terminated.")
-        except Exception as e:
-            logger.error(str(e), exc_info=True)
-            exit(1)
-
-    def new_client(self, client, server):
-        pass
-
-    def client_left(self, client, server):
-        pass
-
-    def message_received(self, client, server, message):
-        pass
-
-    def set_fn_new_client(self, fn):
-        self.new_client = fn
-
-    def set_fn_client_left(self, fn):
-        self.client_left = fn
-
-    def set_fn_message_received(self, fn):
-        self.message_received = fn
-
-    def send_message(self, client, msg):
-        self._unicast_(client, msg)
-
-    def send_message_to_all(self, msg):
-        self._multicast_(msg)
-
-
-# ------------------------- Implementation -----------------------------
-
-class WebsocketServer(ThreadingMixIn, TCPServer, API):
-    """
-	A websocket server waiting for clients to connect.
-
-    Args:
-        port(int): Port to bind to
-        host(str): Hostname or IP to listen for connections. By default 127.0.0.1
-            is being used. To accept connections from any client, you should use
-            0.0.0.0.
-        loglevel: Logging level from logging module to use for logging. By default
-            warnings and errors are being logged.
-
-    Properties:
-        clients(list): A list of connected clients. A client is a dictionary
-            like below.
-                {
-                 'id'      : id,
-                 'handler' : handler,
-                 'address' : (addr, port)
-                }
-    """
-
-    allow_reuse_address = True
-    daemon_threads = True  # comment to keep threads alive until finished
-
-    clients = []
-    id_counter = 0
-
-    def __init__(self, port, host='127.0.0.1', loglevel=logging.WARNING):
-        logger.setLevel(loglevel)
-        TCPServer.__init__(self, (host, port), WebSocketHandler)
-        self.port = self.socket.getsockname()[1]
-
-    def _message_received_(self, handler, msg):
-        self.message_received(self.handler_to_client(handler), self, msg)
-
-    def _ping_received_(self, handler, msg):
-        handler.send_pong(msg)
-
-    def _pong_received_(self, handler, msg):
-        pass
-
-    def _new_client_(self, handler):
-        self.id_counter += 1
-        client = {
-            'id': self.id_counter,
-            'handler': handler,
-            'address': handler.client_address
-        }
-        self.clients.append(client)
-        self.new_client(client, self)
-
-    def _client_left_(self, handler):
-        client = self.handler_to_client(handler)
-        self.client_left(client, self)
-        if client in self.clients:
-            self.clients.remove(client)
-
-    def _unicast_(self, to_client, msg):
-        to_client['handler'].send_message(msg)
-
-    def _multicast_(self, msg):
-        for client in self.clients:
-            self._unicast_(client, msg)
-
-    def handler_to_client(self, handler):
-        for client in self.clients:
-            if client['handler'] == handler:
-                return client
-
-
 class WebSocketHandler(StreamRequestHandler):
-
     def __init__(self, socket, addr, server):
         self.server = server
         StreamRequestHandler.__init__(self, socket, addr, server)
@@ -173,12 +85,20 @@ class WebSocketHandler(StreamRequestHandler):
         self.handshake_done = False
         self.valid_client = False
 
+    def message_stream(self):
+        while self.keep_alive and self.handshake_done and self.valid_client:
+            yield self.read_next_message()
+
     def handle(self):
         while self.keep_alive:
             if not self.handshake_done:
-                self.handshake()
-            elif self.valid_client:
-                self.read_next_message()
+                path = self.handshake()
+
+            if path not in ROUTING_TABLE:
+                logger.warning('Bad path for websocket request: %s' % path)
+                return
+            route_fn = ROUTING_TABLE[path]
+            route_fn(iter(self.message_stream()), self.send_message)
 
     def read_bytes(self, num):
         # python3 gives ordinal of byte directly
@@ -193,7 +113,7 @@ class WebSocketHandler(StreamRequestHandler):
             b1, b2 = self.read_bytes(2)
         except SocketError as e:  # to be replaced with ConnectionResetError for py3
             if e.errno == errno.ECONNRESET:
-                logger.info("Client closed connection.")
+                logger.debug("Client closed connection.")
                 self.keep_alive = 0
                 return
             b1, b2 = 0, 0
@@ -206,7 +126,7 @@ class WebSocketHandler(StreamRequestHandler):
         payload_length = b2 & PAYLOAD_LEN
 
         if opcode == OPCODE_CLOSE_CONN:
-            logger.info("Client asked to close connection.")
+            logger.debug("Client asked to close connection.")
             self.keep_alive = 0
             return
         if not masked:
@@ -220,11 +140,11 @@ class WebSocketHandler(StreamRequestHandler):
             logger.warn("Binary frames are not supported.")
             return
         elif opcode == OPCODE_TEXT:
-            opcode_handler = self.server._message_received_
+            opcode_type = 'text'
         elif opcode == OPCODE_PING:
-            opcode_handler = self.server._ping_received_
+            opcode_type = 'ping'
         elif opcode == OPCODE_PONG:
-            opcode_handler = self.server._pong_received_
+            opcode_type = 'pong'
         else:
             logger.warn("Unknown opcode %#x." % opcode)
             self.keep_alive = 0
@@ -240,7 +160,7 @@ class WebSocketHandler(StreamRequestHandler):
         for message_byte in self.read_bytes(payload_length):
             message_byte ^= masks[len(message_bytes) % 4]
             message_bytes.append(message_byte)
-        opcode_handler(self, message_bytes.decode('utf8'))
+        return (opcode_type, message_bytes.decode('utf8'))
 
     def send_message(self, message):
         self.send_text(message)
@@ -298,8 +218,9 @@ class WebSocketHandler(StreamRequestHandler):
     def read_http_headers(self):
         headers = {}
         # first line should be HTTP GET
-        http_get = self.rfile.readline().decode().strip()
-        assert http_get.upper().startswith('GET')
+        request = self.rfile.readline().decode().strip()
+        method, path, protocol = request.split()
+        assert method.startswith('GET')
         # remaining should be headers
         while True:
             header = self.rfile.readline().decode().strip()
@@ -307,10 +228,10 @@ class WebSocketHandler(StreamRequestHandler):
                 break
             head, value = header.split(':', 1)
             headers[head.lower().strip()] = value.strip()
-        return headers
+        return path, headers
 
     def handshake(self):
-        headers = self.read_http_headers()
+        path, headers = self.read_http_headers()
 
         try:
             assert headers['upgrade'].lower() == 'websocket'
@@ -328,7 +249,7 @@ class WebSocketHandler(StreamRequestHandler):
         response = self.make_handshake_response(key)
         self.handshake_done = self.request.send(response.encode())
         self.valid_client = True
-        self.server._new_client_(self)
+        return path
 
     @classmethod
     def make_handshake_response(cls, key):
@@ -346,25 +267,12 @@ class WebSocketHandler(StreamRequestHandler):
         response_key = b64encode(hash.digest()).strip()
         return response_key.decode('ASCII')
 
-    def finish(self):
-        self.server._client_left_(self)
+def run_websocket_server():
+    server = TCPServer(('127.0.0.1', 5001), WebSocketHandler)
+    server.timeout = 3
+    server.allow_reuse_address = True
+    server.daemon_threads = True
+    server.serve_forever()
 
-
-def encode_to_UTF8(data):
-    try:
-        return data.encode('UTF-8')
-    except UnicodeEncodeError as e:
-        logger.error("Could not encode data to UTF-8 -- %s" % e)
-        return False
-    except Exception as e:
-        raise(e)
-        return False
-
-
-def try_decode_UTF8(data):
-    try:
-        return data.decode('utf-8')
-    except UnicodeDecodeError:
-        return False
-    except Exception as e:
-        raise(e)
+def start_websocket_server():
+    threading.Thread(target=run_websocket_server, daemon=True).start()
