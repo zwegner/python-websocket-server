@@ -44,21 +44,19 @@ def route(path):
         return fn
     return decorate
 
-'''
-+-+-+-+-+-------+-+-------------+-------------------------------+
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-------+-+-------------+-------------------------------+
-|F|R|R|R| opcode|M| Payload len |    Extended payload length    |
-|I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
-|N|V|V|V|       |S|             |   (if payload len==126/127)   |
-| |1|2|3|       |K|             |                               |
-+-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
-|     Extended payload length continued, if payload len == 127  |
-+ - - - - - - - - - - - - - - - +-------------------------------+
-|                     Payload Data continued ...                |
-+---------------------------------------------------------------+
-'''
+# +-+-+-+-+-------+-+-------------+-------------------------------+
+# |0| | | |       | |  1          |        2                   3  |
+# |0|1|2|3|4 5 6 7|8|9 0 1 2 3 4 5|6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1|
+# +-+-+-+-+-------+-+-------------+-------------------------------+
+# |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+# |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+# |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+# | |1|2|3|       |K|             |                               |
+# +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+# |     Extended payload length continued, if payload len == 127  |
+# + - - - - - - - - - - - - - - - +-------------------------------+
+# |                     Payload Data continued ...                |
+# +---------------------------------------------------------------+
 
 FIN    = 0x80
 OPCODE = 0x0f
@@ -85,10 +83,6 @@ class WebSocketHandler(StreamRequestHandler):
         self.handshake_done = False
         self.valid_client = False
 
-    def message_stream(self):
-        while self.keep_alive and self.handshake_done and self.valid_client:
-            yield self.read_next_message()
-
     def handle(self):
         try:
             while self.keep_alive:
@@ -99,7 +93,9 @@ class WebSocketHandler(StreamRequestHandler):
                     logger.warning('Bad path for websocket request: %s' % path)
                     return
                 route_fn = ROUTING_TABLE[path]
-                route_fn(iter(self.message_stream()), self.send_message)
+                logger.info('websocket client connected to %s', path)
+                route_fn(self)
+                logger.info('websocket client disconnected from %s', path)
         except BrokenPipeError as e:
             logger.info("Client connection broken.")
 
@@ -168,8 +164,11 @@ class WebSocketHandler(StreamRequestHandler):
     def send_message(self, message):
         self.send_text(message)
 
+    def send_ping(self, message):
+        self.send_text(message, opcode=OPCODE_PING)
+
     def send_pong(self, message):
-        self.send_text(message, OPCODE_PONG)
+        self.send_text(message, opcode=OPCODE_PONG)
 
     def send_text(self, message, opcode=OPCODE_TEXT):
         """
@@ -271,9 +270,8 @@ class WebSocketHandler(StreamRequestHandler):
         return response_key.decode('ASCII')
 
 def run_websocket_server():
+    TCPServer.allow_reuse_address = True
     server = TCPServer(('127.0.0.1', 5001), WebSocketHandler)
-    server.timeout = 3
-    server.allow_reuse_address = True
     server.daemon_threads = True
     server.serve_forever()
 
