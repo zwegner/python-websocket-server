@@ -35,15 +35,6 @@ def try_decode_UTF8(data):
     except Exception as e:
         raise(e)
 
-ROUTING_TABLE = {}
-
-# Decorator for routing websocket handlers a la Flask
-def route(path):
-    def decorate(fn):
-        ROUTING_TABLE[path] = fn
-        return fn
-    return decorate
-
 # +-+-+-+-+-------+-+-------------+-------------------------------+
 # |0| | | |       | |  1          |        2                   3  |
 # |0|1|2|3|4 5 6 7|8|9 0 1 2 3 4 5|6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1|
@@ -270,11 +261,23 @@ class WebSocketHandler(StreamRequestHandler):
         response_key = b64encode(hash.digest()).strip()
         return response_key.decode('ASCII')
 
-def run_websocket_server():
-    TCPServer.allow_reuse_address = True
-    server = TCPServer(('127.0.0.1', 5001), WebSocketHandler)
-    server.daemon_threads = True
-    server.serve_forever()
+class WebSocketServer(ThreadingMixIn, TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
-def start_websocket_server():
-    threading.Thread(target=run_websocket_server, daemon=True).start()
+    def __init__(self, host, port):
+        address = (host, port)
+        # Have to init in both superclasses? Weird...
+        super(TCPServer, self).__init__(address, WebSocketHandler)
+        super(ThreadingMixIn, self).__init__(address, WebSocketHandler)
+        self.routing_table = {}
+
+    # Decorator for routing websocket handlers a la Flask
+    def route(self, path):
+        def decorate(fn):
+            self.routing_table[path] = fn
+            return fn
+        return decorate
+
+    def start(self):
+        threading.Thread(target=self.serve_forever, daemon=True).start()
