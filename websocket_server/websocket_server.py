@@ -85,17 +85,16 @@ class WebSocketHandler(StreamRequestHandler):
 
     def handle(self):
         try:
-            while self.keep_alive:
-                if not self.handshake_done:
-                    path = self.handshake()
+            if not self.handshake_done:
+                path = self.handshake()
 
-                if path not in ROUTING_TABLE:
-                    logger.warning('Bad path for websocket request: %s' % path)
-                    return
-                route_fn = ROUTING_TABLE[path]
-                logger.info('websocket client connected to %s', path)
-                route_fn(self)
-                logger.info('websocket client disconnected from %s', path)
+            if path not in self.server.routing_table:
+                logger.warning('Bad path for websocket request: %s' % path)
+                return
+            route_fn = self.server.routing_table[path]
+            logger.info('websocket client connected to %s', path)
+            route_fn(self)
+            logger.info('websocket client disconnected from %s', path)
         except BrokenPipeError as e:
             logger.info("Client connection broken.")
 
@@ -108,6 +107,8 @@ class WebSocketHandler(StreamRequestHandler):
             return bytes
 
     def read_next_message(self):
+        if not self.keep_alive:
+            return None
         try:
             b1, b2 = self.read_bytes(2)
         except SocketError as e:  # to be replaced with ConnectionResetError for py3
