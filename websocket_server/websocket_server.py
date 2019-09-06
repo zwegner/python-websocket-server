@@ -261,23 +261,37 @@ class WebSocketHandler(StreamRequestHandler):
         response_key = b64encode(hash.digest()).strip()
         return response_key.decode('ASCII')
 
-class WebSocketServer(ThreadingMixIn, TCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-
-    def __init__(self, host, port):
-        address = (host, port)
-        # Have to init in both superclasses? Weird...
-        super(TCPServer, self).__init__(address, WebSocketHandler)
-        super(ThreadingMixIn, self).__init__(address, WebSocketHandler)
+class WebSocketRouter:
+    def __init__(self, root_path=''):
+        self.root_path = root_path
         self.routing_table = {}
 
     # Decorator for routing websocket handlers a la Flask
     def route(self, path):
         def decorate(fn):
-            self.routing_table[path] = fn
+            self.routing_table['%s%s' % (self.root_path, path)] = fn
             return fn
         return decorate
+
+    def add_router(self, router):
+        for path, fn in router.routing_table.items():
+            self.routing_table['%s%s' % (self.root_path, path)] = fn
+
+class WebSocketServer(ThreadingMixIn, TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, host, port, root_path=''):
+        address = (host, port)
+        # Have to init in both superclasses? Weird...
+        super(TCPServer, self).__init__(address, WebSocketHandler)
+        super(ThreadingMixIn, self).__init__(address, WebSocketHandler)
+        self.router = WebSocketRouter(root_path=root_path)
+        # HACK-ish
+        self.routing_table = self.router.routing_table
+
+    def add_router(self, router):
+        self.router.add_router(router)
 
     def start(self):
         threading.Thread(target=self.serve_forever, daemon=True).start()
